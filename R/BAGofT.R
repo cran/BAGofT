@@ -1,113 +1,92 @@
 #' @export
 
-# load relevant functions
-#source(chi_sel.R)
-#source(chi_sel2.R)
-#source(splitFUN.R)
-#source(groupFUN.R)
-#source(splitFUN_P.R)
-#source(groupFUN_P.R)
-#source(BAGofT_sin.R)
-
 ################################################################
-#The function for BAGofT test.
+#The function to calculate the emperical p-value of multiple-split
+ # results from simulated dataset
+ # If the number of partition variables is larger than Kmax,
+ # apply a random forest to preselect Kmax partition variables
 ################################################################
+# g: number of groups from the partition
+# nsplits: number of splits applied in the multiple splitting
+# ne: test set size
+# nsim: number of simulated data sets to calculate emperical p-value
+BAGofT <- function(testModel, parFun = parRF(),
+                   data, nsplits = 100, ne = floor(5*nrow(data)^(1/2)), nsim = 100){
+  testRes <- BAGofT_multi(testModel = testModel, parFun = parFun,
+                           data = data,  nsplits = nsplits, ne = ne)
 
-# nsplits: number of splits
-# splitMeth : xqt: use the quantiles of covariates to partition
-#            p_fit: use quantiles of fitted probability from the model to partition
-#            neru_fit: use quantiles of fitted probability from neural network to partition
 
 
-BAGofT <- function(formula, data, link = "logit", Ctv = NULL, Dsv = NULL,
-                   g = 5, nsplits = 100, spp = 1/2.3, min.Obsr = 10,
-                   adj = TRUE, partition.Method = "xqt"){
+  if (nsim >= 1){
+    # simulate data
+    pmeansimVec <- numeric(nsim)
+    pmediansimVec <- numeric(nsim)
+    pminsimVec <- numeric(nsim)
 
-  ######################################################
-  # rename the variables
-  fm <- formula
-  datset <- data
-  lk <- link
-  spliDat <- list()
-  qtv <- min.Obsr
-  splitMeth <- partition.Method
-  ######################################################
+    message("Generating simulated data for empirical p-value")
 
-  for (j in c(1:nsplits)){
-    message(paste("split: ", j))
-    spliDat[[j]] <- BAGofT_sin(datset = datset, spp = spp, g = g, fm = fm, adj = adj,
-                            Ctv = Ctv, Dsv = Dsv, qtv = qtv, lk = lk, splitMeth = splitMeth)
-  }
-  pvdat <- unlist(lapply(c(1:(nsplits )), function(x) spliDat[[x]]$p.value))
-  chidat <- unlist(lapply(c(1:(nsplits)), function(x) spliDat[[x]]$chisq))
+    # fit the model to test by training data
+    # we do no need the output for the test set prediction
+    # take a dataset with a single row with all 0s as input
+    dataFittemp <-  data
+    dataFittemp[1, ]<- 0
+    # fit model on the dataset
+    modFit <- testModel(Train.data = data, Validation.data = dataFittemp)
+    # probability calculated from fitted coefficients
+    pdat2 <- modFit$predT
+    for (i in c(1:nsim)){
+      # process bar
+      message(paste("Calculating results from ", i, "th simulated dataset"))
 
-  if (splitMeth == "xqt"){
-    # in each split, the count of the appearance of each partition covariates
-    # used to divide all the sets
-    maxgpCtList <- lapply(c(1:(nsplits)), function(x) spliDat[[x]]$maxgpCt)
-    # in each split, the count of the appearance of each partition covariates
-    # used to divide the set with largest contribution
-    allgpCtList <- lapply(c(1:(nsplits)), function(x) spliDat[[x]]$allgpCt)
+      # randomly generated data from the fitted probabilities
+      ydat2 <- sapply(pdat2, function(x) stats::rbinom(1, 1, x))
+      dat2 <- data
+      Rsp <- modFit$Rsp
+      dat2[,Rsp] <- ydat2
+      # mean statistic calculated from the simulated data.
+      testRes_sim <-  BAGofT_multi(testModel = testModel, parFun = parFun,
+                                   data = dat2,  nsplits = nsplits, ne = ne)
 
-    # get the aggregated results
-    maxgpCtList_Sum <- Reduce(`+`, maxgpCtList)
-    allgpCtList_Sum <- Reduce(`+`, allgpCtList)
+      pmeansimVec[i] <- testRes_sim$meanPv
+      pmediansimVec[i] <- testRes_sim$medianPv
+      pminsimVec[i] <- testRes_sim$minPv
+    }
+    # calculate empirical p-value from simulated data
+    pvalue <- mean(testRes$meanPv > pmeansimVec)
+    pvalue2 <- mean(testRes$medianPv > pmediansimVec)
+    pvalue3 <- mean(testRes$minPv > pminsimVec)
 
-    nr2 <- nrow(datset)
-
-    # statistic and p values
-    BaGofTADstat <- stats :: median(pvdat)
-    BaGofTADpval1 <- stats :: pbeta(BaGofTADstat, 50, 50)
-    BaGofTADpval2 <- stats :: pnorm(BaGofTADstat, 0.5, sqrt(1/(12 * 100)))
-    # using the mean of chisquare statistics
-    BaGofTADstat3 <- mean(chidat)
-    BaGofTADpval3 <- stats :: pnorm(BaGofTADstat3, 5, sqrt(g*2/nsplits), lower.tail = FALSE)
-    message(paste("\n\n\n\n\nMultiple splitting BAGofT\n",
-                  "\n Training set size: ",  floor(nr2- g*nr2^spp),
-                  "\n Test set size: ",  nr2 - floor(nr2- g*nr2^spp),
-                  "\n Number of groups: ", g,
-                  "\n Number of splits: ", nsplits,
-                  "\n Final sample correction: ", adj,
-                  "\n Test statistic value: ", BaGofTADstat,
-                  "\n p.value:", BaGofTADpval2))
-    return(invisible(list(
-      p.value = BaGofTADpval2,
-      test.stat = BaGofTADstat,
-      p.dat = pvdat,
-      chisq.dat = chidat,
-      p.value2 = BaGofTADpval1,
-      test.stat3 = BaGofTADstat3,
-      p.value3 = BaGofTADpval3,
-      maxgpCtList_Sum = maxgpCtList_Sum,
-      allgpCtList_Sum = allgpCtList_Sum,
-      singleSplit.results = spliDat)))
+    message(paste("p-value: ",  pvalue,
+                  "Averaged statistic value: ",  testRes$meanPv))
+    return(invisible( list(p.value = pvalue,
+                           p.value2 = pvalue2,
+                           p.value3 = pvalue3,
+                           pmean = testRes$meanPv,
+                           pmedian = testRes$medianPv,
+                           pmin = testRes$minPv,
+                           simRes = list(pmeanSim = pmeansimVec,
+                                         pmediansim = pmediansimVec,
+                                         pminsim = pminsimVec),
+                           singleSplit.results = testRes$spliDat )      ))
   }else{
-    nr2 <- nrow(datset)
-    BaGofTADstat <- stats :: median(pvdat)
-    BaGofTADpval1 <- stats :: pbeta(BaGofTADstat, 50, 50)
-    BaGofTADpval2 <- stats :: pnorm(BaGofTADstat, 0.5, sqrt(1/(12 * 100)))
-    # using the mean of chisquare statistics
-    BaGofTADstat3 <- mean(chidat)
-    BaGofTADpval3 <- stats :: pnorm(BaGofTADstat3, 5, sqrt(g*2/nsplits), lower.tail = FALSE)
-    message(paste("\n\n\n\n\nMultiple splitting BAGofT\n",
-                  "\n Training set size: ",  floor(nr2- g*nr2^spp),
-                  "\n Test set size: ",  nr2 - floor(nr2- g*nr2^spp),
-                  "\n Number of groups: ", g,
-                  "\n Number of splits: ", nsplits,
-                  "\n Final sample correction: ", adj,
-                  "\n Test statistic value: ", BaGofTADstat,
-                  "\n p.value:", BaGofTADpval2))
-    return(invisible(list(
-      p.value = BaGofTADpval2,
-      test.stat = BaGofTADstat,
-      p.dat = pvdat,
-      chisq.dat = chidat,
-      p.value2 = BaGofTADpval1,
-      test.stat3 = BaGofTADstat3,
-      p.value3 = BaGofTADpval3,
-      singleSplit.results = spliDat)))
+    message(paste("Averaged statistic value: ",  testRes$meanPv))
+    return(     invisible( list(
+                           pmean = testRes$meanPv,
+                           pmedian = testRes$medianPv,
+                           pmin = testRes$minPv,
+                           singleSplit.results = testRes$spliDat )      ))
+
   }
+
 
 
 
 }
+
+
+
+
+
+########################################################################################
+########################################################################################
+
